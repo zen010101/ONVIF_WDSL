@@ -466,6 +466,34 @@ Type
     function GetProfiles: Boolean;
 
     /// <summary>
+    ///   Retrieves the Stream URI for a specific profile.
+    /// </summary>
+    /// <param name="aProfileToken">
+    ///   The token of the profile for which to retrieve the stream URI.
+    /// </param>
+    /// <param name="aStreamUri">
+    ///   Returns the stream URI.
+    /// </param>
+    /// <returns>
+    ///   True if the operation is executed successfully; False otherwise.
+    /// </returns>
+    function GetStreamUri(const aProfileToken: String; var aStreamUri: String): Boolean;
+
+    /// <summary>
+    ///   Retrieves the OSD (On-Screen Display) configuration for a specific video source.
+    /// </summary>
+    /// <param name="aVideoSourceToken">
+    ///   The token of the video source for which to retrieve OSD configuration.
+    /// </param>
+    /// <param name="aOSDInfo">
+    ///   Returns the OSD information as XML string.
+    /// </param>
+    /// <returns>
+    ///   True if the operation is executed successfully; False otherwise.
+    /// </returns>
+    function GetOSDs(const aVideoSourceToken: String; var aOSDInfo: String): Boolean;
+
+    /// <summary>
     ///   Gets or sets the speed parameter for PTZ operations.
     /// </summary>
     property Speed                : Byte               read FSpeed              write FSpeed;
@@ -1444,6 +1472,134 @@ begin
   Result := false;
   if not UrlIsValid then Exit;
   Result := ExecuteRequest(GetUrlByType(atPtz), PreparePTZ_StopMoveRequest, LResultStr);
+end;
+
+function TONVIFManager.GetStreamUri(const aProfileToken: String; var aStreamUri: String): Boolean;
+const GET_STREAM_URI = '<GetStreamUri xmlns="http://www.onvif.org/ver10/media/wsdl">' +
+                       '<StreamSetup>' +
+                       '<Stream xmlns="http://www.onvif.org/ver10/schema">RTP-Unicast</Stream>' +
+                       '<Transport xmlns="http://www.onvif.org/ver10/schema">' +
+                       '<Protocol>RTSP</Protocol>' +
+                       '</Transport>' +
+                       '</StreamSetup>' +
+                       '<ProfileToken>%s</ProfileToken>' +
+                       '</GetStreamUri>' +
+                       '</soap:Body>' +
+                       '</soap:Envelope>';
+var LResultStr  : String;
+    LXMLDoc     : IXMLDocument;
+    LSoapBodyNode: IXMLNode;
+    LUriNode    : IXMLNode;
+begin
+  Result := False;
+  aStreamUri := String.Empty;
+
+  if not UrlIsValid then Exit;
+
+  Result := ExecuteRequest(GetUrlByType(atDeviceService),
+                          GetSoapXMLConnection + Format(GET_STREAM_URI, [aProfileToken]),
+                          LResultStr);
+
+  if Result then
+  begin
+    {$REGION 'Log'}
+    {TSI:IGNORE ON}
+        DoWriteLog('TONVIFManager.GetStreamUri',Format(' XML response [%s]',[LResultStr]),tpLivInfo,true);
+    {TSI:IGNORE OFF}
+    {$ENDREGION}
+
+    LXMLDoc := TXMLDocument.Create(nil);
+    LXMLDoc.LoadFromXML(LResultStr);
+
+    if not IsValidSoapXML(LXMLDoc.DocumentElement) then Exit;
+
+    LSoapBodyNode := GetSoapBody(LXMLDoc.DocumentElement);
+    LUriNode := RecursiveFindNode(LSoapBodyNode, 'Uri');
+
+    if Assigned(LUriNode) then
+      aStreamUri := LUriNode.Text
+    else
+    begin
+      Result := False;
+      {$REGION 'Log'}
+      {TSI:IGNORE ON}
+          DoWriteLog('TONVIFManager.GetStreamUri','Uri node not found',tpLivError);
+      {TSI:IGNORE OFF}
+      {$ENDREGION}
+    end;
+  end
+  else
+    {$REGION 'Log'}
+    {TSI:IGNORE ON}
+        DoWriteLog('TONVIFManager.GetStreamUri',Format(' Error [%d] response [%s]',[FLastStatusCode,LResultStr]),tpLivError);
+    {TSI:IGNORE OFF}
+    {$ENDREGION}
+end;
+
+function TONVIFManager.GetOSDs(const aVideoSourceToken: String; var aOSDInfo: String): Boolean;
+const GET_OSDS = '<GetOSDs xmlns="http://www.onvif.org/ver10/media/wsdl">' +
+                 '<ConfigurationToken>%s</ConfigurationToken>' +
+                 '</GetOSDs>' +
+                 '</soap:Body>' +
+                 '</soap:Envelope>';
+var LResultStr    : String;
+    LXMLDoc       : IXMLDocument;
+    LSoapBodyNode : IXMLNode;
+    LOSDNode      : IXMLNode;
+    I             : Integer;
+begin
+  Result := False;
+  aOSDInfo := String.Empty;
+
+  if not UrlIsValid then Exit;
+
+  Result := ExecuteRequest(GetUrlByType(atDeviceService),
+                          GetSoapXMLConnection + Format(GET_OSDS, [aVideoSourceToken]),
+                          LResultStr);
+
+  if Result then
+  begin
+    {$REGION 'Log'}
+    {TSI:IGNORE ON}
+        DoWriteLog('TONVIFManager.GetOSDs',Format(' XML response [%s]',[LResultStr]),tpLivInfo,true);
+    {TSI:IGNORE OFF}
+    {$ENDREGION}
+
+    aOSDInfo := LResultStr;
+
+    LXMLDoc := TXMLDocument.Create(nil);
+    LXMLDoc.LoadFromXML(LResultStr);
+
+    if not IsValidSoapXML(LXMLDoc.DocumentElement) then Exit;
+
+    LSoapBodyNode := GetSoapBody(LXMLDoc.DocumentElement);
+    LOSDNode := RecursiveFindNode(LSoapBodyNode, 'GetOSDsResponse');
+
+    if Assigned(LOSDNode) then
+    begin
+      Result := True;
+      {$REGION 'Log'}
+      {TSI:IGNORE ON}
+          DoWriteLog('TONVIFManager.GetOSDs',Format('Found %d OSD configurations',[LOSDNode.ChildNodes.Count]),tpLivInfo);
+      {TSI:IGNORE OFF}
+      {$ENDREGION}
+    end
+    else
+    begin
+      Result := False;
+      {$REGION 'Log'}
+      {TSI:IGNORE ON}
+          DoWriteLog('TONVIFManager.GetOSDs','OSD node not found',tpLivError);
+      {TSI:IGNORE OFF}
+      {$ENDREGION}
+    end;
+  end
+  else
+    {$REGION 'Log'}
+    {TSI:IGNORE ON}
+        DoWriteLog('TONVIFManager.GetOSDs',Format(' Error [%d] response [%s]',[FLastStatusCode,LResultStr]),tpLivError);
+    {TSI:IGNORE OFF}
+    {$ENDREGION}
 end;
 
 end.
