@@ -126,9 +126,37 @@ Type
     FSaveResponseOnDisk  : Boolean;
     FSpeed               : Byte;
     FDevice              : TDeviceInformation;
-    FOnWriteLog          : TEventWriteLog; 
+    FOnWriteLog          : TEventWriteLog;
     FProfiles            : TProfiles;
     FCapabilities        : TCapabilitiesONVIF;
+    FCameraDateTime      : TDateTime;
+    FLocalFetchTime      : TDateTime;
+    FUseCameraTime       : Boolean;
+    /// <summary>
+    ///   Gets the current camera time, either from cache or by fetching from camera.
+    ///   If more than 4 minutes have passed since last fetch, fetches new time from camera.
+    /// </summary>
+    /// <returns>
+    ///   The current camera time as TDateTime.
+    /// </returns>
+    function GetCurrentCameraTime: TDateTime;
+
+    /// <summary>
+    ///   Fetches the system date and time from the camera.
+    /// </summary>
+    /// <returns>
+    ///   True if the time was successfully fetched; False otherwise.
+    /// </returns>
+    function FetchCameraDateTime: Boolean;
+
+    /// <summary>
+    ///   Prepares a GetSystemDateAndTime request for ONVIF communication.
+    /// </summary>
+    /// <returns>
+    ///   The prepared GetSystemDateAndTime request string.
+    /// </returns>
+    function PrepareGetSystemDateTimeRequest: String;
+
     /// <summary>
     ///   Calculates the password digest based on the provided parameters.
     /// </summary>
@@ -531,8 +559,15 @@ Type
     /// </summary>
     /// <remarks>
     ///   The ONVIF capabilities, including device, events, PTZ, and extension capabilities.
-    /// </remarks>     
-    property Capabilities         : TCapabilitiesONVIF read FCapabilities; 
+    /// </remarks>
+    property Capabilities         : TCapabilitiesONVIF read FCapabilities;
+
+    /// <summary>
+    ///   Gets or sets whether to use camera time for WSSE authentication.
+    ///   When True, the library will fetch time from the camera and use it for authentication.
+    ///   Time is cached and refreshed every 4 minutes.
+    /// </summary>
+    property UseCameraTime        : Boolean            read FUseCameraTime  write FUseCameraTime;
   end;
 
 implementation
@@ -553,8 +588,11 @@ begin
   FSaveResponseOnDisk := False;
   FPassword           := aPassword;
   FToken              := aToken;
-  Url                 := aUrl;    // execute setUrl;  
+  Url                 := aUrl;    // execute setUrl;
   FSpeed              := 6;
+  FUseCameraTime      := False;
+  FCameraDateTime     := 0;
+  FLocalFetchTime     := 0;
 end;
 
 procedure TONVIFManager.DoWriteLog(const aFunction, aDescription: String;aLivel: TPONVIFLivLog; aIsVerboseLog: boolean=false);
@@ -574,17 +612,25 @@ end;
 procedure TONVIFManager.GetPasswordDigest(Var aPasswordDigest, aNonce, aCreated: String);
 Var i          : Integer;
     LRaw_nonce : TBytes;
-    LBnonce    : TBytes; 
+    LBnonce    : TBytes;
     LDigest    : TBytes;
     Lraw_digest: TBytes;
+    LDateTime  : TDateTime;
 begin
   SetLength(LRaw_nonce, 20);
   for i := 0 to High(LRaw_nonce) do
     LRaw_nonce[i]:= Random(256);
-    
+
   LBnonce         := TNetEncoding.Base64.Encode(LRaw_nonce);
   aNonce          := TEncoding.ANSI.GetString(LBnonce);
-  aCreated        := DateTimeToXMLTime(Now,False);
+
+  // Use camera time if enabled, otherwise use local time
+  if FUseCameraTime then
+    LDateTime := GetCurrentCameraTime
+  else
+    LDateTime := Now;
+
+  aCreated        := DateTimeToXMLTime(LDateTime,False);
   Lraw_digest     := SHA1(LRaw_nonce + TEncoding.ANSI.GetBytes(aCreated) + TEncoding.ANSI.GetBytes(FPassword));
   LDigest         := TNetEncoding.Base64.Encode(Lraw_digest);
   aPasswordDigest := TEncoding.ANSI.GetString(LDigest);
@@ -1444,6 +1490,155 @@ begin
   Result := false;
   if not UrlIsValid then Exit;
   Result := ExecuteRequest(GetUrlByType(atPtz), PreparePTZ_StopMoveRequest, LResultStr);
+end;
+
+function TONVIFManager.PrepareGetSystemDateTimeRequest: String;
+const SOAP_NO_AUTH = '<?xml version="1.0"?> ' +
+                     '<soap:Envelope ' +
+                     'xmlns:soap="http://www.w3.org/2003/05/soap-envelope" ' +
+                     'xmlns:wsdl="http://www.onvif.org/ver10/device/wsdl">' +
+                     '<soap:Body xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"> ';
+      GET_SYSTEM_DATETIME = '<GetSystemDateAndTime xmlns="http://www.onvif.org/ver10/device/wsdl" />'+
+                            '</soap:Body>'+
+                            '</soap:Envelope>';
+begin
+  // GetSystemDateAndTime does not require authentication according to ONVIF spec
+  Result := SOAP_NO_AUTH + GET_SYSTEM_DATETIME;
+end;
+
+function TONVIFManager.FetchCameraDateTime: Boolean;
+var LResultStr         : String;
+    LXMLDoc            : IXMLDocument;
+    LSoapBodyNode      : IXMLNode;
+    LDateTimeNode      : IXMLNode;
+    LUTCDateTimeNode   : IXMLNode;
+    LTimeNode          : IXMLNode;
+    LDateNode          : IXMLNode;
+    LYear, LMonth, LDay: Integer;
+    LHour, LMinute, LSecond: Integer;
+
+    function GetChildNodeValue(const ParentNode: IXMLNode; const ChildNodeName: string): string;
+    begin
+      Result := '';
+      if Assigned(ParentNode) then
+      begin
+        if ParentNode.ChildNodes.IndexOf(ChildNodeName) > -1 then
+          Result := ParentNode.ChildNodes[ChildNodeName].Text;
+      end;
+    end;
+begin
+  Result := False;
+  if not UrlIsValid then Exit;
+
+  Result := ExecuteRequest(GetUrlByType(atDevice), PrepareGetSystemDateTimeRequest, LResultStr);
+
+  if Result then
+  begin
+    {$REGION 'Log'}
+    {TSI:IGNORE ON}
+        DoWriteLog('TONVIFManager.FetchCameraDateTime',Format(' XML response [%s]',[LResultStr]),tpLivInfo,true);
+    {TSI:IGNORE OFF}
+    {$ENDREGION}
+
+    LXMLDoc := TXMLDocument.Create(nil);
+    LXMLDoc.LoadFromXML(LResultStr);
+
+    if not IsValidSoapXML(LXMLDoc.DocumentElement) then exit;
+
+    LSoapBodyNode := GetSoapBody(LXMLDoc.DocumentElement);
+    LDateTimeNode := RecursiveFindNode(LSoapBodyNode,'SystemDateAndTime');
+
+    if Assigned(LDateTimeNode) then
+    begin
+      // Try to get UTC DateTime first
+      LUTCDateTimeNode := RecursiveFindNode(LDateTimeNode,'UTCDateTime');
+
+      if Assigned(LUTCDateTimeNode) then
+      begin
+        LTimeNode := RecursiveFindNode(LUTCDateTimeNode,'Time');
+        LDateNode := RecursiveFindNode(LUTCDateTimeNode,'Date');
+
+        if Assigned(LTimeNode) and Assigned(LDateNode) then
+        begin
+          // Parse date
+          LYear  := StrToIntDef(GetChildNodeValue(LDateNode,'Year'), 0);
+          LMonth := StrToIntDef(GetChildNodeValue(LDateNode,'Month'), 0);
+          LDay   := StrToIntDef(GetChildNodeValue(LDateNode,'Day'), 0);
+
+          // Parse time
+          LHour   := StrToIntDef(GetChildNodeValue(LTimeNode,'Hour'), 0);
+          LMinute := StrToIntDef(GetChildNodeValue(LTimeNode,'Minute'), 0);
+          LSecond := StrToIntDef(GetChildNodeValue(LTimeNode,'Second'), 0);
+
+          // Create TDateTime
+          try
+            FCameraDateTime := EncodeDate(LYear, LMonth, LDay) + EncodeTime(LHour, LMinute, LSecond, 0);
+            FLocalFetchTime := Now;
+            Result := True;
+
+            {$REGION 'Log'}
+            {TSI:IGNORE ON}
+                DoWriteLog('TONVIFManager.FetchCameraDateTime',Format('Camera time fetched: %s',[DateTimeToStr(FCameraDateTime)]),tpLivInfo);
+            {TSI:IGNORE OFF}
+            {$ENDREGION}
+          except
+            on E: Exception do
+            begin
+              Result := False;
+              {$REGION 'Log'}
+              {TSI:IGNORE ON}
+                  DoWriteLog('TONVIFManager.FetchCameraDateTime',Format('Error encoding date/time: %s',[E.Message]),tpLivError);
+              {TSI:IGNORE OFF}
+              {$ENDREGION}
+            end;
+          end;
+        end;
+      end;
+    end;
+  end
+  else
+    {$REGION 'Log'}
+    {TSI:IGNORE ON}
+        DoWriteLog('TONVIFManager.FetchCameraDateTime',Format(' Error [%d] response [%s]',[FLastStatusCode,LResultStr]),tpLivError);
+    {TSI:IGNORE OFF}
+    {$ENDREGION}
+end;
+
+function TONVIFManager.GetCurrentCameraTime: TDateTime;
+var LElapsedTime: TDateTime;
+begin
+  // Check if we need to fetch camera time
+  // Conditions: never fetched (FLocalFetchTime = 0) or more than 4 minutes elapsed
+  if (FLocalFetchTime = 0) or (Now - FLocalFetchTime > (4 / (24 * 60))) then
+  begin
+    {$REGION 'Log'}
+    {TSI:IGNORE ON}
+        DoWriteLog('TONVIFManager.GetCurrentCameraTime','Fetching camera time (cache expired or first time)',tpLivInfo);
+    {TSI:IGNORE OFF}
+    {$ENDREGION}
+
+    if not FetchCameraDateTime then
+    begin
+      // If fetch fails, fall back to local time
+      {$REGION 'Log'}
+      {TSI:IGNORE ON}
+          DoWriteLog('TONVIFManager.GetCurrentCameraTime','Failed to fetch camera time, using local time',tpLivWarning);
+      {TSI:IGNORE OFF}
+      {$ENDREGION}
+      Result := Now;
+      Exit;
+    end;
+  end;
+
+  // Calculate current camera time based on elapsed local time
+  LElapsedTime := Now - FLocalFetchTime;
+  Result := FCameraDateTime + LElapsedTime;
+
+  {$REGION 'Log'}
+  {TSI:IGNORE ON}
+      DoWriteLog('TONVIFManager.GetCurrentCameraTime',Format('Using camera time: %s (elapsed: %f minutes)',[DateTimeToStr(Result), LElapsedTime * 24 * 60]),tpLivInfo,True);
+  {TSI:IGNORE OFF}
+  {$ENDREGION}
 end;
 
 end.

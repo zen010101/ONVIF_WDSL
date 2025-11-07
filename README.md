@@ -32,6 +32,23 @@ For instance, you can retrieve device information, handle profiles, and more.
 Don't forget to replace <Login>, <Password>, and <URL onvif example http://xxx.xxx.xxx.xxx:580/>
 with your actual credentials and ONVIF device URL.
 
+## WSSE Authentication with Camera Time Synchronization
+The library now supports using the camera's system time for WSSE authentication instead of the local system time. This feature is useful when there's a time difference between the local machine and the camera:
+
+```delphi
+// Enable camera time synchronization for WSSE authentication
+LONVIFManager.UseCameraTime := True;
+```
+
+When `UseCameraTime` is enabled:
+- The library automatically fetches the camera's system time using `GetSystemDateAndTime`
+- The fetched time is cached and reused for subsequent requests
+- The cached time is automatically updated by adding the elapsed local time
+- The cache is refreshed automatically when more than 4 minutes have passed since the last fetch
+- If fetching camera time fails, the library falls back to using local system time
+
+This feature helps resolve authentication issues caused by time synchronization problems between the client and camera.
+
 # Documentation
 comprehensive English documentation set is embedded directly in the source code in XML format, providing an easily accessible reference for developers
 
